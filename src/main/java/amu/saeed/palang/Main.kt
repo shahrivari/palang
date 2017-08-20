@@ -1,2 +1,0 @@
-package amu.saeed.palang
-
