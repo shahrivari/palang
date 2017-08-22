@@ -2,11 +2,13 @@ package amu.saeed.palang.types;
 
 import amu.saeed.palang.PalangRuntimeException;
 import com.esotericsoftware.kryo.Kryo;
-import com.esotericsoftware.kryo.io.Input;
 import com.esotericsoftware.kryo.io.Output;
 import com.google.common.base.Charsets;
 
-import java.io.*;
+import java.io.BufferedOutputStream;
+import java.io.FileOutputStream;
+import java.io.IOException;
+import java.io.OutputStreamWriter;
 import java.util.Iterator;
 import java.util.Spliterator;
 import java.util.Spliterators;
@@ -17,7 +19,7 @@ import java.util.stream.StreamSupport;
 
 /**
  */
-public abstract class DataSet<T> implements Iterable<T> {
+public abstract class DataSet<T> implements Iterable<T>, AutoCloseable {
 
     protected abstract void conclude();
 
@@ -27,27 +29,45 @@ public abstract class DataSet<T> implements Iterable<T> {
         DataSet<R> ds = newObjectFromThis();
         for (T t : this)
             ds.append(fun.apply(t));
+        ds.conclude();
+        return ds;
+    }
+
+    public <R> DataSet<R> flatMap(Function<? super T, ? extends Iterator<? extends R>> fun) {
+        DataSet<R> ds = newObjectFromThis();
+        for (T t : this) {
+            Iterator<? extends R> iter = fun.apply(t);
+            while (iter.hasNext())
+                ds.append(iter.next());
+        }
+        ds.conclude();
         return ds;
     }
 
     public DataSet<T> filter(Predicate<? super T> predicate) {
-        DataSet<T> newDS = newObjectFromThis();
+        DataSet<T> ds = newObjectFromThis();
         for (T t : this)
             if (predicate.test(t))
-                newDS.append(t);
-        return newDS;
+                ds.append(t);
+        ds.conclude();
+        return ds;
     }
 
     public DataSet<T> clone() {
-        DataSet<T> newDS = newObjectFromThis();
+        DataSet<T> ds = newObjectFromThis();
         for (T t : this)
-            newDS.append(t);
-        return newDS;
+            ds.append(t);
+        ds.conclude();
+        return ds;
 
     }
 
-    public abstract int size();
-
+    public long count() {
+        long count = 0;
+        for (T t : this)
+            count++;
+        return count;
+    }
 
     public void saveAsTextFile(String path) throws IOException {
         FileOutputStream fileOutputStream = new FileOutputStream(path);
@@ -91,7 +111,7 @@ public abstract class DataSet<T> implements Iterable<T> {
         return Spliterators.spliteratorUnknownSize(iterator(), Spliterator.ORDERED | Spliterator.IMMUTABLE);
     }
 
-    public Stream<T> stream() { return StreamSupport.stream(spliterator(),false); }
+    public Stream<T> stream() { return StreamSupport.stream(spliterator(), false); }
 
     @Override
     public boolean equals(Object o) {
@@ -115,4 +135,7 @@ public abstract class DataSet<T> implements Iterable<T> {
 
         return true;
     }
+
+    @Override
+    public abstract void close();
 }

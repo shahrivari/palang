@@ -5,54 +5,42 @@ import com.esotericsoftware.kryo.Kryo;
 import com.esotericsoftware.kryo.io.Input;
 import com.esotericsoftware.kryo.io.Output;
 import com.google.common.base.Preconditions;
+import net.jpountz.lz4.LZ4BlockInputStream;
+import net.jpountz.lz4.LZ4BlockOutputStream;
 import org.jetbrains.annotations.NotNull;
 
 import java.io.*;
 import java.nio.file.Files;
 import java.nio.file.Paths;
+import java.util.ArrayList;
 import java.util.Iterator;
-import java.util.function.Function;
-import java.util.function.Predicate;
+import java.util.List;
+import java.util.stream.Stream;
 
 /**
  * Created by saeed on 8/20/17.
  */
 public class PersistDataSet<T> extends DataSet<T> {
-    private static boolean KEEP_TEMP_FILES = false;
-    private String filePath;
+    private final List<FileInputStream> usedStreams = new ArrayList<>();
     private FileOutputStream fostream;
+    private File backFile;
     private BufferedOutputStream bostream;
     private Output output = new Output(new ByteArrayOutputStream());
     private Kryo kryo = new Kryo();
     private Class<T> type;
-    private int size = 0;
+    private LZ4BlockOutputStream compstream;
+    private boolean isFirstRecord = true;
 
     public PersistDataSet() {
         try {
-            filePath = File.createTempFile("palang", ".dat").getPath();
-            if (!KEEP_TEMP_FILES) {
-                File file = new File(filePath);
-                file.deleteOnExit();
-            }
-            fostream = new FileOutputStream(filePath);
-            bostream = new BufferedOutputStream(fostream);
+            backFile = File.createTempFile("palang", ".dat");
+            backFile.deleteOnExit();
+            fostream = new FileOutputStream(backFile);
+            compstream = new LZ4BlockOutputStream(fostream);
+            bostream = new BufferedOutputStream(compstream);
         } catch (IOException e) {
             throw new RuntimeException(e);
         }
-    }
-
-    @SafeVarargs
-    public static <T> PersistDataSet<T> newDataSet(T... elements) {
-        return newDataSet(elements);
-    }
-
-    public static <T> PersistDataSet<T> newDataSet(Iterable<T> elements) {
-        Preconditions.checkNotNull(elements);
-        PersistDataSet<T> ds = new PersistDataSet<>();
-        for (T element : elements)
-            ds.append(element);
-        ds.conclude();
-        return ds;
     }
 
     public static <T> PersistDataSet<T> newDataSet(Iterator<T> iter) {
@@ -62,6 +50,14 @@ public class PersistDataSet<T> extends DataSet<T> {
             ds.append(iter.next());
         ds.conclude();
         return ds;
+    }
+
+    public static <T> PersistDataSet<T> newDataSet(Iterable<T> elements) {
+        return newDataSet(elements.iterator());
+    }
+
+    public static <T> PersistDataSet<T> newDataSet(Stream<T> stream) {
+        return newDataSet(stream.iterator());
     }
 
     @Override
@@ -77,11 +73,14 @@ public class PersistDataSet<T> extends DataSet<T> {
 
     @Override
     protected void append(T t) {
-        size++;
-        if (type == null)
+        if (isFirstRecord) {
+            Preconditions.checkNotNull(t, "First record cannot be null!");
+            isFirstRecord = false;
             type = (Class<T>) t.getClass();
+        }
+
         output.clear();
-        kryo.writeObject(output, t);
+        kryo.writeObjectOrNull(output, t, type);
         try {
             bostream.write(output.getBuffer(), 0, output.position());
         } catch (IOException e) {
@@ -90,19 +89,30 @@ public class PersistDataSet<T> extends DataSet<T> {
         output.clear();
     }
 
-    public long sizeOnDisk() { return new File(filePath).length();}
+    @Override
+    protected void finalize() { close(); }
+
 
     @Override
-    public int size() {
-        return size;
+    public void close() {
+        try {
+            for (FileInputStream stream : usedStreams)
+                stream.close();
+        } catch (IOException e) { throw new PalangRuntimeException(e); }
     }
+
+    public long sizeOnDisk() { return backFile.length();}
+
 
     @NotNull
     @Override
     public Iterator<T> iterator() {
         try {
-            FileInputStream ifstream = new FileInputStream(filePath);
-            final Input input = new Input(ifstream);
+            FileInputStream ifstream = new FileInputStream(backFile);
+            LZ4BlockInputStream zstream = new LZ4BlockInputStream(ifstream);
+            final Input input = new Input(zstream);
+            usedStreams.add(ifstream);
+
             Iterator<T> iter = new Iterator<T>() {
                 @Override
                 public boolean hasNext() {
@@ -118,11 +128,19 @@ public class PersistDataSet<T> extends DataSet<T> {
 
                 @Override
                 public T next() {
-                    return kryo.readObject(input, type);
+                    return kryo.readObjectOrNull(input, type);
                 }
+
+                @Override
+                protected void finalize() {
+                    try {
+                        ifstream.close();
+                    } catch (IOException e) { throw new PalangRuntimeException(e); }
+                }
+
             };
             return iter;
-        } catch (FileNotFoundException e) {
+        } catch (IOException e) {
             throw new RuntimeException(e);
         }
     }
